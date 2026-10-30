@@ -73,10 +73,22 @@
     2. Extracted `has_amount_mismatch = (amount_a != amount_b)` and `has_status_mismatch = (status_a != status_b)`.
     3. Appended order IDs to `amount_mismatches` and/or `status_mismatches` independently, appending to `matched` strictly when neither mismatches.
 
+- **Ambiguity Finding & Resolution Procedure:**
+  After passing visible baseline tests, we performed a dedicated ambiguity audit to eliminate hidden edge-case risks:
+  1. *Explicit Null vs Missing Key Ambiguity in `_get_amount`:* Testing revealed that if a record explicitly contained `{"amount_paise": None, "total_paise": 5000}`, using `"amount_paise" in record` returned `None` instead of falling back to `total_paise`. Refined `_get_amount` to:
+     ```python
+     amt = record.get("amount_paise")
+     return amt if amt is not None else record.get("total_paise")
+     ```
+  2. *Un-identified Event Collisions:* Ensured that events with `event_id=None` do not append `None` into `processed_event_ids`, preventing different anonymous events from colliding.
+  3. *Post-Settlement Immutability:* Verified that once an order reaches `payment_status="REFUNDED"`, neither late `payment_confirmed` events nor extraneous refunds can alter or revert the status.
+  4. *Fuzz Testing:* Tested malformed payloads (`None`, `{}`, negative amounts, non-numeric values) to confirm zero uncaught exceptions.
+
 ## 4. Implementation Decisions
 - **Immutability and Defensive Copying:** Kept `deepcopy()` on input orders to guarantee caller dictionary immutability as asserted by `test_input_order_is_not_mutated`.
 - **Python Boolean Trap Guard:** Explicitly guarded with `not isinstance(amount, bool)` because in Python `isinstance(True, int)` evaluates to `True`.
 - **Dual Mismatch Categorization:** Designed reconciliation so that records differing in both amount and status (such as `ORD-1078` in `records.json`) are recorded in both mismatch lists rather than short-circuiting.
+- **Null-Safe Amount Resolution:** Ensured `_get_amount()` gracefully handles explicit `None` fields.
 - **Stretch Feature Choice:** Implemented `export_awaiting_refund_csv(orders)` to generate operational CSV reports for finance teams tracking outstanding refunds.
 
 ## 5. Verification
@@ -84,7 +96,7 @@
   - Preserved all 212 baseline tests without weakening or skipping.
   - Added `tests/test_regression.py` containing 9 new test suites covering conflicting replay payloads, late payment arrivals, post-dispatch cancellation blocking, multi-step partial refund series, malformed inputs, dual reconciliation mismatches, the full 150-order synthetic dataset from `data/records.json`, and CSV export.
 - **Commands run and actual results:**
-  - `python3 -m pytest -q` -> `221 passed in 0.09s` (0 failures, 0 warnings).
+  - `python3 -m pytest -q` -> `221 passed in 0.08s` (0 failures, 0 warnings).
   - `python3 -m main` -> Correct demo output:
     ```text
     matched: ['ORD-101']
@@ -93,11 +105,12 @@
     amount_mismatches: []
     status_mismatches: ['ORD-102']
     ```
-- **Edge cases verified:**
+- **Edge cases verified via Ambiguity Audit:**
   - Conflicting payload replay under identical `event_id` is ignored.
   - Payment confirmed event arriving after restaurant rejection or customer cancellation properly populates `refund_due_paise`.
   - Duplicate payment confirmation cannot revert an order marked `REFUNDED` back to `PAID`.
   - Non-integer amounts (`True`, `False`, strings, negative amounts) are discarded.
+  - Explicit `None` values in amount fields cleanly fallback to `total_paise`.
   - Reconciliation against all 150 internal orders and 163 provider records in `data/records.json` yields exact expected partition (107 matched, 12 missing from provider, 25 missing from internal, 20 amount mismatches, 12 status mismatches).
 - **Remaining failures or known limitations:**
   - None. All 221 tests pass with 100% success rate.

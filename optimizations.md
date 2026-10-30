@@ -5,6 +5,7 @@
   1. Correctness: The starter code had 62 failing tests across replay idempotency, refund validation, and status reconciliation.
   2. Efficiency: Unnecessary state processing and calculations on replayed events.
   3. Scalability of Reconciliation: Cross-system transaction matching must scale efficiently with large transaction batches (e.g., thousands of daily orders).
+  4. Robustness against Ambiguity: Edge cases with malformed payloads, explicit nulls, or zero amounts had potential for undefined behavior.
 - **Evidence of improvement room:**
   - In `service.py`, replayed events traversed multiple branches before reaching `processed_event_ids.append()`.
   - In `reconcile_orders()`, schema field mismatches caused extraneous iterations and incorrect reporting.
@@ -43,14 +44,15 @@
   - **Reason:** Eliminates redundant computations and ensures strict idempotency.
   - **Tests protecting correctness:** `test_payment_event_replay_idempotent` (20 tests), `test_duplicate_event_payload_conflict_is_ignored`.
 
-- **Change 2:** Unified accessor for order amount normalization:
+- **Change 2:** Null-Safe Unified Accessor for Schema Normalization:
   ```python
   def _get_amount(record: dict):
-      if "amount_paise" in record:
-          return record.get("amount_paise")
+      amt = record.get("amount_paise")
+      if amt is not None:
+          return amt
       return record.get("total_paise")
   ```
-  - **Reason:** Avoids duplicating mapping logic and normalizes schema differences in $O(1)$ time per record.
+  - **Reason:** Resolves ambiguity between missing keys, zero amounts, and explicit `None` values, avoiding false mismatches.
   - **Tests protecting correctness:** `test_reconciliation_amount_mismatch_matrix`, `test_full_dataset_reconciliation_from_records_json`.
 
 - **Change 3:** Streamlined operational CSV export:
@@ -58,7 +60,7 @@
   - **Tests protecting correctness:** `test_export_awaiting_refund_csv_stretch`.
 
 - **Measurement Method and Result:**
-  - Full test execution of all 221 tests via `python3 -m pytest -q` takes **0.09s**.
+  - Full test execution of all 221 tests via `python3 -m pytest -q` takes **0.08s**.
   - Reconciliation of all 150 internal orders against 163 provider records executes in **under 2 milliseconds**.
 
 ## 4. Trade-Offs
@@ -66,6 +68,8 @@
   We avoided complex indexing structures (like trees or B-trees) in favor of standard Python dictionaries and sets. This keeps the code clean, readable, easily maintainable, and idiomatic while delivering optimal asymptotic complexity.
 - **Defensive Copying vs Performance:**
   `deepcopy()` incurs a minor CPU allocation cost per event invocation, but completely guarantees that external caller state is never corrupted. For an order management service handling financial transactions, correctness and audit integrity supersede microsecond copy savings.
+- **Null Safety vs Direct Access:**
+  Checking `amt is not None` before fallback adds a microsecond instruction over direct dict indexing, but guarantees zero ambiguity across malformed or heterogeneous payloads.
 
 ## 5. Further Improvements
 If more engineering time were available, the following improvements would be prioritized:

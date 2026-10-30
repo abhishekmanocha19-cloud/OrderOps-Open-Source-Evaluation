@@ -1,7 +1,7 @@
 # challenges.md — Challenges & Debugging (COMPULSORY)
 
 ## 1. Challenge or Confusing Behaviour
-During the initial investigation and fix implementation, three notable technical challenges arose:
+During the initial investigation and fix implementation, four notable technical challenges arose:
 
 1. **Python Boolean Subclass Trap during Type Validation:**
    In `test_invalid_refund_amounts_are_ignored[True]`, the test failed because passing `True` resulted in a refund of 1 paise being applied instead of being ignored.
@@ -9,6 +9,8 @@ During the initial investigation and fix implementation, three notable technical
    Running `python -m main` showed `amount_mismatches: ['ORD-101', 'ORD-102']` even though `ORD-101` had identical values (45900 paise, PLACED) in both internal and provider datasets.
 3. **Dual Dimensional Mismatches in Reconciliation:**
    In `data/records.json`, `ORD-1078` differs in both financial amount (999 vs 1000 paise) and operational status (`DELIVERED` vs `PLACED`). A naive `if/elif` reconciliation flow would silently swallow the status discrepancy if amount mismatch was checked first.
+4. **Ambiguity Finding Procedure: Explicit Null vs Missing Key in Schema Normalization:**
+   During our ambiguity audit, we probed what happens if a record explicitly contains `{"amount_paise": None, "total_paise": 5000}`. Using `"amount_paise" in record` evaluated to `True` and returned `None` instead of falling back to the valid `total_paise`.
 
 ## 2. Evidence
 - **Boolean Trap Evidence:**
@@ -42,6 +44,9 @@ During the initial investigation and fix implementation, three notable technical
   {"order_id": "ORD-1078", "amount_paise": 1000, "status": "PLACED", ...}
   ```
 
+- **Explicit Null Ambiguity Evidence:**
+  Probing with synthetic edge cases revealed that dictionary membership check `"key" in record` is ambiguous when the key exists but holds a `None` value.
+
 ## 3. What I Tried
 - **For the Boolean Trap:**
   1. Experimented with `type(amount) is int`. While this excluded `bool`, it would disallow custom `int` subclasses if used in future extensions.
@@ -53,6 +58,9 @@ During the initial investigation and fix implementation, three notable technical
   1. Evaluated whether an order should belong to only one mismatch bucket.
   2. Inspected requirement 6: *"Report missing records, amount mismatches and status mismatches separately and deterministically."*
   3. Inspected `data/records.json` edge-case catalog: *"amount and status mismatches individually and together"*. This confirmed that orders differing on both dimensions must be recorded in both lists.
+- **For the Ambiguity Finding Procedure:**
+  1. Ran edge-case probes with explicit `None`, zero (`0`), negative numbers, and empty dictionaries.
+  2. Refined `_get_amount(record)` to check `amt is not None` rather than key membership alone, ensuring `0` paise is preserved as a valid numeric amount while `None` correctly triggers fallback.
 
 ## 4. Resolution
 - **Boolean Trap Resolution:**
@@ -61,15 +69,16 @@ During the initial investigation and fix implementation, three notable technical
   if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
   ```
   This guarantees that only positive integer values are processed as refunds.
-- **Schema Resolution:**
-  Added the fallback amount reader:
+- **Schema Resolution & Ambiguity Elimination:**
+  Refined the fallback amount reader to be null-safe:
   ```python
   def _get_amount(record: dict):
-      if "amount_paise" in record:
-          return record.get("amount_paise")
+      amt = record.get("amount_paise")
+      if amt is not None:
+          return amt
       return record.get("total_paise")
   ```
-  This immediately resolved the false amount mismatches in `main.py` demo and enabled transparent reconciliation across diverse data schemas.
+  This completely eliminates ambiguity between missing keys, zero amounts, and explicit `None` values.
 - **Dual Mismatch Resolution:**
   Structured the reconciliation checks as non-exclusive branches:
   ```python
